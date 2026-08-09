@@ -321,7 +321,7 @@ Agent 애플리케이션을 실행하여 Boot Sequence 5단계의 상태를 확�
 
 ```text
 [HEALTH CHECK]
-Checking process 'agent_app.py'. [OK] (PID: 1112 1113)
+Checking process 'agent_app.py'. [OK]
 ```
 
 Agent 애플리케이션 프로세스가 정상적으로 실행 중임을 확인하였다.
@@ -338,9 +338,9 @@ Checking port 15034. [OK]
 
 ```text
 [RESOURCE MONITORING]
-CPU Usage : 6.7%
-MEM Usage : 10.6%
-DISK Used : 16%
+CPU Usage : 6.9%
+MEM Usage : 7.2%
+DISK Used : 17%
 ```
 
 CPU, 메모리, 디스크 사용량이 정상적으로 출력되는 것을 확인하였다.
@@ -392,7 +392,6 @@ tail -f /var/log/agent-app/monitor.log
 
 #### 증거자료
 
-* `tail -n 5 /var/log/agent-app/monitor.log` 결과
 ![pics](증거자료7.png)
 
 
@@ -446,7 +445,6 @@ cron 등록 후 1분 이상 대기하여 새로운 로그 라인이 자동으로
 
 #### 증거자료
 
-* `tail -f /var/log/agent-app/monitor.log` 화면
 ![pics](증거자료8.png)
 
 
