@@ -453,75 +453,122 @@ cron 등록 후 1분 이상 대기하여 새로운 로그 라인이 자동으로
 #### 자동화 스크립트 소스코드
 
 ```text
-#!/bin/bash
+
+#!/usr/bin/env bash
+set -u
 
 LOG_FILE="/var/log/agent-app/monitor.log"
+APP_NAME="agent-app-linux-arm64"
 PORT=15034
+MAX_LOG_SIZE=10485760  # 10 MiB
 
-echo "====== SYSTEM MONITOR RESULT ======"
+# 프로세스 또는 포트 이상 여부를 저장한다.
+STATUS=0
 
-# Health Check - Process
-PID=$(pgrep -f "agent-app-linux-x86")
+log() {
+    printf '%s [%s] %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" \
+        | tee -a "$LOG_FILE"
+}
 
-echo "[HEALTH CHECK]"
+# 로그 파일이 10 MiB 이상이면 회전한다.
+# 보관 로그는 monitor.log.1 ~ monitor.log.10까지 최대 10개.
+if [[ -f "$LOG_FILE" ]]; then
+    LOG_SIZE=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
 
-if [ -z "$PID" ]; then
-    echo "Checking process 'agent_app.py'. [FAIL]"
-    exit 1
-else
-    echo "Checking process 'agent_app.py'. [OK] (PID: $PID)"
+    if (( LOG_SIZE >= MAX_LOG_SIZE )); then
+        rm -f "${LOG_FILE}.10"
+
+        for i in {9..1}; do
+            if [[ -f "${LOG_FILE}.${i}" ]]; then
+                mv -f "${LOG_FILE}.${i}" \
+                    "${LOG_FILE}.$((i+1))"
+            fi
+        done
+
+        mv -f "$LOG_FILE" "${LOG_FILE}.1"
+    fi
 fi
 
-# Health Check - Port
-if ss -tuln | grep -q ":$PORT "; then
-    echo "Checking port $PORT. [OK]"
+# 1. 애플리케이션 프로세스 확인
+if pgrep -u agent-admin -f "$APP_NAME" >/dev/null; then
+    log INFO "Agent process is running."
 else
-    echo "Checking port $PORT. [FAIL]"
-    exit 1
+    log WARN "Agent process is NOT running."
+    STATUS=1
 fi
 
-# Firewall Check
+# 2. TCP 포트 확인
+if ss -ltnH "sport = :$PORT" | grep -q .; then
+    log INFO "TCP port $PORT is listening."
+else
+    log WARN "TCP port $PORT is NOT listening."
+    STATUS=1
+fi
+
+# 3. 방화벽 확인: 경고만 기록하고 STATUS는 변경하지 않는다.
 if command -v ufw >/dev/null 2>&1; then
-    if ! ufw status | grep -q "Status: active"; then
-        echo "[WARNING] UFW is inactive."
+    if sudo -n /usr/sbin/ufw status 2>/dev/null \
+        | grep -q "Status: active"; then
+        log INFO "UFW firewall is active."
+    else
+        log WARN "UFW firewall is inactive or status unavailable."
     fi
 elif command -v firewall-cmd >/dev/null 2>&1; then
-    if ! firewall-cmd --state >/dev/null 2>&1; then
-        echo "[WARNING] firewalld is inactive."
+    if firewall-cmd --state 2>/dev/null | grep -q running; then
+        log INFO "firewalld is active."
+    else
+        log WARN "firewalld is inactive."
     fi
+else
+    log WARN "No supported firewall command found."
 fi
 
-echo
-echo "[RESOURCE MONITORING]"
+# 4. CPU, 메모리, 디스크 사용량 확인
+CPU=$(LC_ALL=C top -bn1 |
+    awk -F'[, ]+' '/Cpu\(s\)/ {
+        for (i=1; i<=NF; i++)
+            if ($i ~ /id/) {
+                print 100-$(i-1)
+                exit
+            }
+    }')
 
-CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print 100-$8}')
-MEM=$(free | awk '/Mem:/ {printf("%.1f"), $3/$2*100}')
-DISK=$(df / | awk 'NR==2 {gsub("%","",$5); print $5}')
+MEM=$(free | awk '/Mem:/ {
+    if ($2 > 0)
+        printf "%.1f", $3/$2*100
+    else
+        print "0"
+}')
 
-printf "CPU Usage : %.1f%%\n" "$CPU"
-echo "MEM Usage : ${MEM}%"
-echo "DISK Used : ${DISK}%"
+DISK_USED=$(df -P / |
+    awk 'NR==2 {gsub("%","",$5); print $5}')
 
-CPU_INT=${CPU%.*}
-MEM_INT=${MEM%.*}
+log INFO "CPU=${CPU:-unknown}% MEM=${MEM:-unknown}% DISK_USED=${DISK_USED:-unknown}%"
 
-if [ "$CPU_INT" -gt 20 ]; then
-    echo "[WARNING] CPU threshold exceeded (${CPU}% > 20%)"
+# 임계치 초과는 경고만 기록한다.
+if [[ ${CPU:-} =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+    awk "BEGIN {exit !($CPU > 20)}"; then
+    log WARN "CPU usage exceeds 20%."
 fi
 
-if [ "$MEM_INT" -gt 10 ]; then
-    echo "[WARNING] MEM threshold exceeded (${MEM}% > 10%)"
+if [[ ${MEM:-} =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+    awk "BEGIN {exit !($MEM > 10)}"; then
+    log WARN "Memory usage exceeds 10%."
 fi
 
-if [ "$DISK" -gt 80 ]; then
-    echo "[WARNING] DISK threshold exceeded (${DISK}% > 80%)"
+if [[ ${DISK_USED:-} =~ ^[0-9]+$ ]] &&
+    (( DISK_USED > 80 )); then
+    log WARN "Disk usage exceeds 80%."
 fi
 
-TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+# 5. 모든 점검 후 최종 종료 코드 반환
+if (( STATUS != 0 )); then
+    log WARN "Monitoring completed with process/port errors."
+else
+    log INFO "Monitoring completed successfully."
+fi
 
-echo "[$TIMESTAMP] PID:$PID CPU:${CPU}% MEM:${MEM}% DISK_USED:${DISK}%" >> "$LOG_FILE"
-
-echo
-echo "[INFO] Log appended: $LOG_FILE"
+exit "$STATUS"
 
 ```
